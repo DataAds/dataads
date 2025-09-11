@@ -3,39 +3,50 @@ name: Deploy to VPS
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
+      # --- Клонируем репо ---
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      # --- Ставим Node ---
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      - name: Build frontend
+      # --- Сборка фронта ---
+      - name: Install deps & build (frontend)
         working-directory: frontend
         run: |
-          npm ci
+          npm ci || npm install
           npm run build
 
+      # --- Пакуем билд в архив ---
       - name: Pack build
-        run: tar -czf site.tgz -C frontend build
+        run: |
+          tar -czf site.tgz -C frontend build
+          echo "==> Проверим, что архив реально создан:"
+          ls -lah
+          ls -lah site.tgz || echo "❌ site.tgz не найден!"
 
-      - name: Upload to VPS
+      # --- Заливаем архив на сервер ---
+      - name: Upload build to VPS (scp)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           source: "site.tgz"
-          target: "/tmp/site.tgz"
+          target: "/tmp"
 
-      - name: Release switch on VPS
+      # --- Разворачиваем и переключаем релиз ---
+      - name: Release switch on VPS (ssh)
         uses: appleboy/ssh-action@v0.1.10
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -43,11 +54,30 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
+
+            echo "==> Проверяем архив"
+            ls -lah /tmp/site.tgz || echo "❌ нет файла site.tgz"
+            file /tmp/site.tgz || true
+
+            echo "==> Создаем новый релиз"
             mkdir -p /var/www/dataads/releases
             REL="/var/www/dataads/releases/$(date +%s)"
             mkdir -p "$REL"
-            tar -xzf /tmp/site.tgz -C "$REL" --strip-components=1
+
+            echo "==> Распаковываем"
+            tar -xzf /tmp/site.tgz -C "$REL" --strip-components=1 || (echo "❌ Ошибка распаковки" && exit 1)
+
+            echo "==> Делаем симлинк current -> $REL"
             ln -sfn "$REL" /var/www/dataads/current
-            nginx -t && systemctl reload nginx
-            echo "✅ Deployed to $REL"
+
+            echo "==> Проверка Nginx"
+            nginx -t
+            systemctl reload nginx
+
+            echo "==> Проверка сайта"
+            curl -I -s https://dataads.online/ | head -n1 || true
+            curl -I -s https://dataads.online/index.html | head -n1 || true
+
+            echo "✅ Deploy закончен"
+
 
